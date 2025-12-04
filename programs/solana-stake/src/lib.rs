@@ -6,9 +6,8 @@ const POINTS_PER_SOL_PER_DAY: u64 = 1_000_000; // Using micro-points for precisi
 const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
 const SECONDS_PER_DAY: u64 = 86_400;
 
+#[program]
 pub mod solana_stake {
-    use anchor_lang::solana_program::clock;
-
     use super::*;
 
     pub fn create_pda(ctx: Context<CreatePda>) -> Result<()> {
@@ -36,10 +35,14 @@ pub mod solana_stake {
         let cpi_context = CpiContext::new(ctx.accounts.system_program.to_account_info(),
          system_program::Transfer{
             from: ctx.accounts.user.to_account_info(),
-            to: ctx.accounts.pda_account.to_account_info(),
+            to: pda_account.to_account_info(),
          }
          );
          system_program::transfer(cpi_context, amount)?;
+
+        pda_account.staked_amount = pda_account.staked_amount.checked_add(amount)
+            .ok_or(StakeError::Overflow)?;
+        pda_account.last_updated_time = clock.unix_timestamp;
 
      Ok(())
     }
@@ -51,34 +54,30 @@ pub mod solana_stake {
 
         update_points(pda_account, clock.unix_timestamp)?;
 
-    require!(amount >= pda_account.staked_amount, StakeError::InsufficientStake);
+        require!(amount <= pda_account.staked_amount, StakeError::InsufficientStake);
 
-        let user_key = ctx.accounts.user.key();
-        let seeds = &[
-            b"client1", 
-            user_key.as_ref(),
-            &[pda_account.bump],
-        ];
+        **pda_account.to_account_info().try_borrow_mut_lamports()? = pda_account
+            .to_account_info()
+            .lamports()
+            .checked_sub(amount)
+            .ok_or(StakeError::Underflow)?;
+        
+        **ctx.accounts.user.to_account_info().try_borrow_mut_lamports()? = ctx
+            .accounts
+            .user
+            .to_account_info()
+            .lamports()
+            .checked_add(amount)
+            .ok_or(StakeError::Overflow)?;
 
-        let signer = &[&seeds[..]];
-        let cpi_context = CpiContext::new_with_signer(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer{
-                from:pda_account.to_account_info(),
-                to:ctx.accounts.user.to_account_info()
-            },
-            signer,
-        );
-        system_program::transfer(cpi_context, amount)?;
+        pda_account.staked_amount = pda_account.staked_amount.checked_sub(amount)
+            .ok_or(StakeError::Underflow)?;
+        pda_account.last_updated_time = clock.unix_timestamp;
 
+        msg!("Unstaked {} lamports. Remaining staked: {}, Total points: {}", 
+            amount, pda_account.staked_amount, pda_account.total_points / 1_000_000);
 
-pda_account.staked_amount = pda_account.staked_amount.checked_sub(amount)
-.ok_or(StakeError::Underflow)?;
-
-msg!("Unstaked {} lamports. Remaining staked: {}, Total points: {}", 
-amount, pda_account.staked_amount, pda_account.total_points / 1_000_000);
-
-Ok(())
+        Ok(())
     }
 
 pub fn claim_points(ctx: Context<StakeOperationMut>)-> Result<()>{
@@ -118,31 +117,37 @@ Ok(())
 
 }
 fn update_points(pda_account: &mut StakeAccount, current_time:i64)-> Result<()>{
+    let time_elapsed = current_time.checked_sub(pda_account.last_updated_time).ok_or(StakeError::InvalidTimestamp)? as u64;
 
-let time_elapsed = current_time.checked_sub(pda_account.last_updated_time).ok_or(StakeError::InvalidTimestamp)? as u64;
+    if time_elapsed > 0 && pda_account.staked_amount > 0{
+        let new_points = calculate_points(pda_account.staked_amount, time_elapsed)?;
 
-if time_elapsed > 0 && pda_account.staked_amount > 0{
-    let new_points = calculate_points(pda_account.staked_amount, time_elapsed)?;
-
-    pda_account.total_points = pda_account.total_points.checked_add(new_points)
-    .ok_or(StakeError::Overflow)?;
-}
-Ok(())
+        pda_account.total_points = pda_account.total_points.checked_add(new_points)
+            .ok_or(StakeError::Overflow)?;
+    }
+    
+    pda_account.last_updated_time = current_time;
+    Ok(())
 }
 
 fn calculate_points(staked_amount: u64 , time_elapsed_seconds : u64)-> Result<u64>{
+    // Formula: points = (staked_amount * time_elapsed_seconds * POINTS_PER_SOL_PER_DAY) / (LAMPORTS_PER_SOL * SECONDS_PER_DAY)
+    // This calculates: (staked_amount / LAMPORTS_PER_SOL) * (time_elapsed_seconds / SECONDS_PER_DAY) * POINTS_PER_SOL_PER_DAY
+    
+    let denominator = (LAMPORTS_PER_SOL as u128)
+        .checked_mul(SECONDS_PER_DAY as u128)
+        .ok_or(StakeError::Overflow)?;
+    
+    let numerator = (staked_amount as u128)
+        .checked_mul(time_elapsed_seconds as u128)
+        .ok_or(StakeError::Overflow)?
+        .checked_mul(POINTS_PER_SOL_PER_DAY as u128)
+        .ok_or(StakeError::Overflow)?;
+    
+    let points = numerator.checked_div(denominator)
+        .ok_or(StakeError::Overflow)?;
 
-let points = (staked_amount as u128)
-.checked_mul(time_elapsed_seconds as u128)
-.ok_or(StakeError::Overflow)?
-.checked_mul(POINTS_PER_SOL_PER_DAY as u128)
-.ok_or(StakeError::Overflow)?
-.checked_mul(LAMPORTS_PER_SOL as u128)
-.ok_or(StakeError::Overflow)?
-.checked_mul(SECONDS_PER_DAY as u128)
-.ok_or(StakeError::Overflow)?;
-
-Ok(points as u64)
+    Ok(points as u64)
 }
 
 
