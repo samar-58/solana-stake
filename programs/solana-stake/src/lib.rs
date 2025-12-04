@@ -40,10 +40,37 @@ pub mod solana_stake {
          }
          );
          system_program::transfer(cpi_context, amount)?;
-         
+
      Ok(())
     }
 
+    pub fn unstake(ctx: Context<StakeOperationMut>, amount : u64)-> Result<()>{
+        require!(amount > 0, StakeError::InvalidAmount);
+        let pda_account = &mut ctx.accounts.pda_account;
+        let clock = Clock::get()?;
+
+        update_points(pda_account, clock.unix_timestamp)?;
+
+ 
+        let user_key = ctx.accounts.user.key();
+        let seeds = &[
+            b"client1", 
+            user_key.as_ref(),
+            &[pda_account.bump],
+        ];
+        
+        let signer = &[&seeds[..]];
+        let cpi_context = CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer{
+                from:ctx.accounts.pda_account.to_account_info(),
+                to:ctx.accounts.user.to_account_info()
+            },
+            signer,
+        );
+        system_program::transfer(cpi_context, amount)?;
+        Ok(())
+    }
 }
 fn update_points(pda_account: &mut StakeAccount, current_time:i64)-> Result<()>{
 
