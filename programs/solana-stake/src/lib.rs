@@ -51,26 +51,71 @@ pub mod solana_stake {
 
         update_points(pda_account, clock.unix_timestamp)?;
 
- 
+    require!(amount >= pda_account.staked_amount, StakeError::InsufficientStake);
+
         let user_key = ctx.accounts.user.key();
         let seeds = &[
             b"client1", 
             user_key.as_ref(),
             &[pda_account.bump],
         ];
-        
+
         let signer = &[&seeds[..]];
         let cpi_context = CpiContext::new_with_signer(
             ctx.accounts.system_program.to_account_info(),
             system_program::Transfer{
-                from:ctx.accounts.pda_account.to_account_info(),
+                from:pda_account.to_account_info(),
                 to:ctx.accounts.user.to_account_info()
             },
             signer,
         );
         system_program::transfer(cpi_context, amount)?;
-        Ok(())
+
+
+pda_account.staked_amount = pda_account.staked_amount.checked_sub(amount)
+.ok_or(StakeError::Underflow)?;
+
+msg!("Unstaked {} lamports. Remaining staked: {}, Total points: {}", 
+amount, pda_account.staked_amount, pda_account.total_points / 1_000_000);
+
+Ok(())
     }
+
+pub fn claim_points(ctx: Context<StakeOperationMut>)-> Result<()>{
+    let pda_account = &mut ctx.accounts.pda_account;
+    let clock = Clock::get()?;
+
+    update_points(pda_account, clock.unix_timestamp)?;
+
+
+    let claimable_points = pda_account.total_points / 1_000_000; 
+
+    msg!("User has {} claimable points", claimable_points);
+
+    pda_account.total_points = 0;
+    Ok(())
+}
+
+pub fn get_points(ctx: Context<StakeOperation>)-> Result<()>{
+let pda_account = &mut ctx.accounts.pda_account;
+let clock = Clock::get()?;
+let current_time = clock.unix_timestamp;
+let time_elapsed = current_time.checked_sub(pda_account.last_updated_time)
+.ok_or(StakeError::InvalidTimestamp)? as u64;
+
+if time_elapsed > 0 && pda_account.staked_amount > 0{
+    let new_points = calculate_points(pda_account.staked_amount, time_elapsed)?;
+    let current_total_points = pda_account.total_points.checked_add(new_points)
+    .ok_or(StakeError::Overflow)?;
+
+    msg!("Current points: {}, Staked amount: {} SOL", 
+    current_total_points / 1_000_000, 
+    pda_account.staked_amount / LAMPORTS_PER_SOL);
+
+}
+Ok(())
+}
+
 }
 fn update_points(pda_account: &mut StakeAccount, current_time:i64)-> Result<()>{
 
