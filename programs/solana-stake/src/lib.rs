@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 declare_id!("4DSyXGut8W6SqDzyYgssesk5d7599didy65vqyvmprbP");
 
-const POINTS_PER_SOL_PER_DAY: u64 = 1_000_000; // Using micro-points for precision
+const POINTS_PER_SOL_PER_DAY: u64 = 1_000_000; 
 const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
 const SECONDS_PER_DAY: u64 = 86_400;
 
